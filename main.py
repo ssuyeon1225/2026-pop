@@ -1,11 +1,14 @@
-import streamlit as st
+import os
+import re
+import unicodedata
+
 import pandas as pd
 import plotly.graph_objects as go
-import re
+import streamlit as st
 
 
 # =========================================================
-# 1. 페이지 기본 설정
+# 1. Streamlit 페이지 설정
 # =========================================================
 st.set_page_config(
     page_title="지역별 인구구조 분석",
@@ -13,73 +16,164 @@ st.set_page_config(
     layout="wide"
 )
 
+
 st.title("지역별 연령 인구구조 분석")
 
 st.markdown(
     """
-    지역명을 검색하고 원하는 지역을 선택하면,
-    해당 지역의 **연령별 전체·남성·여성 인구 구조**를
-    한눈에 확인할 수 있습니다.
+    지역명을 검색하고 원하는 지역을 선택하면
+    해당 지역의 **연령별 전체·남성·여성 인구 구조**를 확인할 수 있습니다.
     """
 )
 
 
 # =========================================================
-# 2. 데이터 파일 설정
+# 2. 데이터 파일명
 # =========================================================
-FILE_NAME = "202608_202608_연령별인구현황_월간.csv"
+TARGET_FILE_NAME = "202608_202608_연령별인구현황_월간.csv"
 
 
 # =========================================================
-# 3. CSV 불러오기
+# 3. app.py가 위치한 폴더 확인
+# =========================================================
+BASE_DIR = os.path.dirname(
+    os.path.abspath(__file__)
+)
+
+
+# =========================================================
+# 4. CSV 파일 찾기
+# =========================================================
+def find_data_file():
+    """
+    app.py와 같은 폴더에서 지정한 CSV 파일을 찾습니다.
+
+    Mac에서 한글 파일명이 NFC/NFD 방식으로 다르게 저장되는
+    문제를 방지하기 위해 Unicode 정규화를 적용합니다.
+    """
+
+    target_normalized = unicodedata.normalize(
+        "NFC",
+        TARGET_FILE_NAME
+    )
+
+    for file_name in os.listdir(BASE_DIR):
+
+        file_normalized = unicodedata.normalize(
+            "NFC",
+            file_name
+        )
+
+        if file_normalized == target_normalized:
+
+            return os.path.join(
+                BASE_DIR,
+                file_name
+            )
+
+    return None
+
+
+# =========================================================
+# 5. CSV 데이터 불러오기
 # =========================================================
 @st.cache_data
 def load_data():
-    """
-    행정안전부 주민등록 인구통계 CSV 파일을 불러옵니다.
-    현재 파일은 CP949 인코딩을 기준으로 읽습니다.
-    """
 
+    file_path = find_data_file()
+
+    if file_path is None:
+
+        raise FileNotFoundError(
+            f"{TARGET_FILE_NAME} 파일을 찾을 수 없습니다."
+        )
+
+    # 현재 행정안전부 CSV는 cp949 인코딩
+    try:
+
+        df = pd.read_csv(
+            file_path,
+            encoding="cp949",
+            low_memory=False
+        )
+
+        return df
+
+    except UnicodeDecodeError:
+
+        pass
+
+
+    # 혹시 utf-8-sig로 저장된 경우
+    try:
+
+        df = pd.read_csv(
+            file_path,
+            encoding="utf-8-sig",
+            low_memory=False
+        )
+
+        return df
+
+    except UnicodeDecodeError:
+
+        pass
+
+
+    # 마지막으로 utf-8 시도
     df = pd.read_csv(
-        FILE_NAME,
-        encoding="cp949",
+        file_path,
+        encoding="utf-8",
         low_memory=False
     )
 
     return df
 
 
+# =========================================================
+# 6. 데이터 로딩
+# =========================================================
 try:
+
     df = load_data()
 
-except FileNotFoundError:
 
-    st.error(
-        f"""
-        데이터 파일을 찾을 수 없습니다.
+except FileNotFoundError as e:
 
-        app.py와 같은 폴더에 아래 파일이 있는지 확인하세요.
+    st.error(str(e))
 
-        {FILE_NAME}
+    st.warning(
+        """
+        app.py와 CSV 파일이 GitHub 저장소의 같은 폴더에 있는지 확인하세요.
         """
     )
 
+    st.subheader("현재 확인된 파일")
+
+    files = os.listdir(BASE_DIR)
+
+    for file in files:
+        st.write(f"- {file}")
+
     st.stop()
+
 
 except Exception as e:
 
     st.error(
-        f"데이터를 불러오는 중 오류가 발생했습니다.\n\n{e}"
+        f"데이터 파일을 읽는 중 오류가 발생했습니다.\n\n{e}"
     )
 
     st.stop()
 
 
 # =========================================================
-# 4. 숫자 문자열 정리 함수
+# 7. 숫자 변환 함수
 # =========================================================
 def clean_number(value):
     """
+    문자열 숫자를 정수로 변환합니다.
+
     예:
     '9,281,625' -> 9281625
     """
@@ -87,7 +181,14 @@ def clean_number(value):
     if pd.isna(value):
         return 0
 
-    value = str(value).replace(",", "").strip()
+    value = (
+        str(value)
+        .replace(",", "")
+        .strip()
+    )
+
+    if value == "":
+        return 0
 
     try:
         return int(float(value))
@@ -97,22 +198,23 @@ def clean_number(value):
 
 
 # =========================================================
-# 5. 연령별 열 찾는 함수
+# 8. 연령 열 찾기
 # =========================================================
 def find_age_columns(dataframe, gender):
     """
-    gender:
-        계 = 전체
-        남 = 남성
-        여 = 여성
+    gender
+
+    계 = 전체
+    남 = 남성
+    여 = 여성
 
     예:
-        2026년08월_계_0세
-        2026년08월_남_35세
-        2026년08월_여_100세 이상
+    2026년08월_계_0세
+    2026년08월_남_35세
+    2026년08월_여_100세 이상
     """
 
-    result = []
+    age_columns = []
 
     pattern = re.compile(
         rf"^\d{{4}}년\d{{2}}월_{gender}_(\d+세|100세 이상)$"
@@ -120,22 +222,32 @@ def find_age_columns(dataframe, gender):
 
     for column in dataframe.columns:
 
-        match = pattern.match(str(column))
+        match = pattern.match(
+            str(column)
+        )
 
         if match is None:
             continue
 
+
         age_label = match.group(1)
 
+
         if age_label == "100세 이상":
+
             age = 100
 
         else:
+
             age = int(
-                age_label.replace("세", "")
+                age_label.replace(
+                    "세",
+                    ""
+                )
             )
 
-        result.append(
+
+        age_columns.append(
             {
                 "age": age,
                 "label": age_label,
@@ -143,32 +255,38 @@ def find_age_columns(dataframe, gender):
             }
         )
 
-    result.sort(
+
+    age_columns.sort(
         key=lambda x: x["age"]
     )
 
-    return result
+
+    return age_columns
 
 
 # =========================================================
-# 6. 데이터 구조 확인
+# 9. 필수 열 확인
 # =========================================================
 if "행정구역" not in df.columns:
 
     st.error(
-        "'행정구역' 열을 찾을 수 없습니다."
+        """
+        데이터에서 '행정구역' 열을 찾을 수 없습니다.
+
+        올바른 연령별 인구현황 CSV 파일인지 확인하세요.
+        """
     )
 
     st.stop()
 
 
 # =========================================================
-# 7. 지역명 정리
+# 10. 지역명 정리
 # =========================================================
-# 원본 예시:
+# 원본
 # 서울특별시 종로구 (1111000000)
 #
-# 화면 표시:
+# 화면 표시
 # 서울특별시 종로구
 
 df["지역명"] = (
@@ -184,9 +302,10 @@ df["지역명"] = (
 
 
 # =========================================================
-# 8. 기준年月 자동 확인
+# 11. 기준 연월 확인
 # =========================================================
 year_month = None
+
 
 for column in df.columns:
 
@@ -200,7 +319,9 @@ for column in df.columns:
         year = match.group(1)
         month = match.group(2)
 
-        year_month = f"{year}년 {month}월"
+        year_month = (
+            f"{year}년 {month}월"
+        )
 
         break
 
@@ -213,7 +334,7 @@ if year_month:
 
 
 # =========================================================
-# 9. 연령별 열 목록 만들기
+# 12. 연령별 열 찾기
 # =========================================================
 total_age_columns = find_age_columns(
     df,
@@ -234,40 +355,60 @@ female_age_columns = find_age_columns(
 if len(total_age_columns) == 0:
 
     st.error(
-        "전체 연령별 인구 열을 찾을 수 없습니다."
+        """
+        전체 연령별 인구 데이터를 찾을 수 없습니다.
+
+        CSV의 열 이름을 확인하세요.
+        """
     )
 
     st.stop()
 
 
 # =========================================================
-# 10. 지역 선택 영역
+# 13. 남녀 열을 연령 기준으로 딕셔너리화
+# =========================================================
+male_column_dict = {
+    item["age"]: item["column"]
+    for item in male_age_columns
+}
+
+
+female_column_dict = {
+    item["age"]: item["column"]
+    for item in female_age_columns
+}
+
+
+# =========================================================
+# 14. 지역 검색
 # =========================================================
 st.divider()
 
 st.subheader("지역 선택")
 
 
-# -------------------------
-# 지역명 입력
-# -------------------------
 search_keyword = st.text_input(
     "지역명을 입력하세요",
     placeholder="예: 서울, 종로구, 강남구, 수원시"
 )
 
 
-# -------------------------
-# 입력한 검색어로 필터링
-# -------------------------
-if search_keyword.strip():
+# 검색어 양쪽 공백 제거
+search_keyword = search_keyword.strip()
+
+
+# =========================================================
+# 15. 검색 결과 필터링
+# =========================================================
+if search_keyword:
 
     filtered_df = df[
-        df["지역명"]
-        .str.contains(
-            search_keyword.strip(),
+        df["지역명"].str.contains(
+            search_keyword,
             case=False,
-            na=False
+            na=False,
+            regex=False
         )
     ]
 
@@ -276,9 +417,6 @@ else:
     filtered_df = df
 
 
-# -------------------------
-# 선택 가능한 지역 목록
-# -------------------------
 region_options = (
     filtered_df["지역명"]
     .dropna()
@@ -287,23 +425,29 @@ region_options = (
 )
 
 
+# =========================================================
+# 16. 검색 결과가 없는 경우
+# =========================================================
 if len(region_options) == 0:
 
     st.warning(
-        f"'{search_keyword}'에 해당하는 지역이 없습니다."
+        f"'{search_keyword}'에 해당하는 지역을 찾을 수 없습니다."
     )
 
     st.stop()
 
 
+# =========================================================
+# 17. 지역 선택
+# =========================================================
 selected_region = st.selectbox(
-    "검색 결과에서 지역을 선택하세요",
+    "지역을 선택하세요",
     options=region_options
 )
 
 
 # =========================================================
-# 11. 선택 지역 행 추출
+# 18. 선택 지역 데이터 추출
 # =========================================================
 selected_rows = df[
     df["지역명"] == selected_region
@@ -323,87 +467,91 @@ selected_row = selected_rows.iloc[0]
 
 
 # =========================================================
-# 12. 연령별 DataFrame 만들기
+# 19. 연령별 데이터 만들기
 # =========================================================
 age_data = []
-
-
-# 각 연령을 기준으로 열 매칭
-male_column_dict = {
-    item["age"]: item["column"]
-    for item in male_age_columns
-}
-
-female_column_dict = {
-    item["age"]: item["column"]
-    for item in female_age_columns
-}
 
 
 for item in total_age_columns:
 
     age = item["age"]
+
     age_label = item["label"]
+
     total_column = item["column"]
 
 
-    total_population = clean_number(
+    total_population_age = clean_number(
         selected_row[total_column]
     )
 
 
-    male_column = male_column_dict.get(age)
+    # 남성
+    male_column = male_column_dict.get(
+        age
+    )
 
     if male_column is not None:
 
-        male_population = clean_number(
+        male_population_age = clean_number(
             selected_row[male_column]
         )
 
     else:
 
-        male_population = 0
+        male_population_age = 0
 
 
-    female_column = female_column_dict.get(age)
+    # 여성
+    female_column = female_column_dict.get(
+        age
+    )
 
     if female_column is not None:
 
-        female_population = clean_number(
+        female_population_age = clean_number(
             selected_row[female_column]
         )
 
     else:
 
-        female_population = 0
+        female_population_age = 0
 
 
     age_data.append(
         {
             "연령": age,
             "연령표시": age_label,
-            "전체": total_population,
-            "남성": male_population,
-            "여성": female_population
+            "전체": total_population_age,
+            "남성": male_population_age,
+            "여성": female_population_age
         }
     )
 
 
-age_df = pd.DataFrame(age_data)
+age_df = pd.DataFrame(
+    age_data
+)
 
 
 # =========================================================
-# 13. 총인구 계산
+# 20. 총인구 계산
 # =========================================================
-total_population = age_df["전체"].sum()
+total_population = int(
+    age_df["전체"].sum()
+)
 
-male_population = age_df["남성"].sum()
+male_population = int(
+    age_df["남성"].sum()
+)
 
-female_population = age_df["여성"].sum()
+female_population = int(
+    age_df["여성"].sum()
+)
 
 
 # =========================================================
-# 14. 주요 인구 지표
+# 21. 지역 인구 현황
 # =========================================================
 st.divider()
 
@@ -412,7 +560,9 @@ st.subheader(
 )
 
 
-metric1, metric2, metric3, metric4 = st.columns(4)
+metric1, metric2, metric3, metric4 = st.columns(
+    4
+)
 
 
 with metric1:
@@ -467,7 +617,7 @@ with metric4:
 
 
 # =========================================================
-# 15. 연령별 인구구조
+# 22. 연령별 인구구조
 # =========================================================
 st.divider()
 
@@ -477,14 +627,14 @@ st.subheader(
 
 
 # =========================================================
-# 16. 그래프 설정
+# 23. 그래프 옵션
 # =========================================================
-setting_col1, setting_col2 = st.columns(
+option_col1, option_col2 = st.columns(
     [2, 3]
 )
 
 
-with setting_col1:
+with option_col1:
 
     age_range = st.slider(
         "표시할 연령 범위",
@@ -495,27 +645,34 @@ with setting_col1:
     )
 
 
-with setting_col2:
+with option_col2:
 
-    st.write("표시할 인구 유형")
+    st.write(
+        "그래프에 표시할 인구"
+    )
 
-    checkbox1, checkbox2, checkbox3 = st.columns(3)
+    check1, check2, check3 = st.columns(
+        3
+    )
 
-    with checkbox1:
+
+    with check1:
 
         show_total = st.checkbox(
             "전체",
             value=True
         )
 
-    with checkbox2:
+
+    with check2:
 
         show_male = st.checkbox(
             "남성",
             value=True
         )
 
-    with checkbox3:
+
+    with check3:
 
         show_female = st.checkbox(
             "여성",
@@ -524,7 +681,7 @@ with setting_col2:
 
 
 # =========================================================
-# 17. 그래프용 데이터 필터링
+# 24. 선택 연령 범위 필터링
 # =========================================================
 graph_df = age_df[
     (
@@ -540,19 +697,22 @@ graph_df = age_df[
 
 
 # =========================================================
-# 18. Plotly 꺾은선 그래프
+# 25. Plotly 그래프 생성
 # =========================================================
 fig = go.Figure()
 
 
-# -------------------------
-# 전체
-# -------------------------
+# =========================================================
+# 26. 전체 인구
+# =========================================================
 if show_total:
 
     fig.add_trace(
+
         go.Scatter(
+
             x=graph_df["연령"],
+
             y=graph_df["전체"],
 
             mode="lines",
@@ -565,21 +725,24 @@ if show_total:
 
             hovertemplate=(
                 "<b>%{x}세</b><br>"
-                "전체 인구: %{y:,}명"
+                "전체: %{y:,}명"
                 "<extra></extra>"
             )
         )
     )
 
 
-# -------------------------
-# 남성
-# -------------------------
+# =========================================================
+# 27. 남성 인구
+# =========================================================
 if show_male:
 
     fig.add_trace(
+
         go.Scatter(
+
             x=graph_df["연령"],
+
             y=graph_df["남성"],
 
             mode="lines",
@@ -592,21 +755,24 @@ if show_male:
 
             hovertemplate=(
                 "<b>%{x}세</b><br>"
-                "남성 인구: %{y:,}명"
+                "남성: %{y:,}명"
                 "<extra></extra>"
             )
         )
     )
 
 
-# -------------------------
-# 여성
-# -------------------------
+# =========================================================
+# 28. 여성 인구
+# =========================================================
 if show_female:
 
     fig.add_trace(
+
         go.Scatter(
+
             x=graph_df["연령"],
+
             y=graph_df["여성"],
 
             mode="lines",
@@ -619,7 +785,7 @@ if show_female:
 
             hovertemplate=(
                 "<b>%{x}세</b><br>"
-                "여성 인구: %{y:,}명"
+                "여성: %{y:,}명"
                 "<extra></extra>"
             )
         )
@@ -627,13 +793,17 @@ if show_female:
 
 
 # =========================================================
-# 19. 그래프 디자인
+# 29. Plotly 디자인
 # =========================================================
 fig.update_layout(
 
     title=dict(
-        text=f"{selected_region} 연령별 인구 구조",
+        text=(
+            f"{selected_region} 연령별 인구 구조"
+        ),
+
         x=0.5,
+
         xanchor="center"
     ),
 
@@ -648,10 +818,10 @@ fig.update_layout(
     height=650,
 
     margin=dict(
-        l=30,
+        l=40,
         r=30,
         t=80,
-        b=40
+        b=50
     ),
 
     legend=dict(
@@ -665,7 +835,7 @@ fig.update_layout(
 
 
 # =========================================================
-# 20. X축 설정
+# 30. X축 설정
 # =========================================================
 fig.update_xaxes(
 
@@ -680,16 +850,12 @@ fig.update_xaxes(
         age_range[1]
     ],
 
-    showgrid=True,
-
-    title_font=dict(
-        size=15
-    )
+    showgrid=True
 )
 
 
 # =========================================================
-# 21. Y축 설정
+# 31. Y축 설정
 # =========================================================
 fig.update_yaxes(
 
@@ -697,16 +863,12 @@ fig.update_yaxes(
 
     rangemode="tozero",
 
-    showgrid=True,
-
-    title_font=dict(
-        size=15
-    )
+    showgrid=True
 )
 
 
 # =========================================================
-# 22. Plotly 그래프 출력
+# 32. 그래프 출력
 # =========================================================
 st.plotly_chart(
     fig,
@@ -715,57 +877,75 @@ st.plotly_chart(
 
 
 st.caption(
-    "※ 그래프에서 100세는 원자료의 '100세 이상'을 의미합니다."
+    "※ 그래프의 100세는 원자료의 '100세 이상' 인구를 의미합니다."
 )
 
 
 # =========================================================
-# 23. 인구가 가장 많은 연령 찾기
+# 33. 가장 인구가 많은 연령
 # =========================================================
 if not age_df.empty:
 
-    max_age_row = age_df.loc[
+    max_age_index = (
         age_df["전체"].idxmax()
+    )
+
+    max_age_row = age_df.loc[
+        max_age_index
     ]
+
 
     st.info(
         f"""
         **{selected_region}에서 인구가 가장 많은 연령은
-        {max_age_row['연령표시']}이며,
-        {max_age_row['전체']:,}명입니다.**
+        {max_age_row["연령표시"]}이며,
+        {int(max_age_row["전체"]):,}명입니다.**
         """
     )
 
 
 # =========================================================
-# 24. 주요 연령집단 계산
+# 34. 주요 연령집단 계산
 # =========================================================
-child_population = age_df.loc[
-    age_df["연령"].between(
-        0,
-        14
-    ),
-    "전체"
-].sum()
+
+# 유소년 인구: 0~14세
+child_population = int(
+
+    age_df.loc[
+        age_df["연령"].between(
+            0,
+            14
+        ),
+        "전체"
+    ].sum()
+)
 
 
-working_population = age_df.loc[
-    age_df["연령"].between(
-        15,
-        64
-    ),
-    "전체"
-].sum()
+# 생산연령 인구: 15~64세
+working_population = int(
+
+    age_df.loc[
+        age_df["연령"].between(
+            15,
+            64
+        ),
+        "전체"
+    ].sum()
+)
 
 
-elderly_population = age_df.loc[
-    age_df["연령"] >= 65,
-    "전체"
-].sum()
+# 고령 인구: 65세 이상
+elderly_population = int(
+
+    age_df.loc[
+        age_df["연령"] >= 65,
+        "전체"
+    ].sum()
+)
 
 
 # =========================================================
-# 25. 연령집단 비율
+# 35. 주요 연령집단 비율
 # =========================================================
 if total_population > 0:
 
@@ -795,7 +975,7 @@ else:
 
 
 # =========================================================
-# 26. 연령집단 요약
+# 36. 주요 연령집단 출력
 # =========================================================
 st.divider()
 
@@ -804,10 +984,12 @@ st.subheader(
 )
 
 
-group_col1, group_col2, group_col3 = st.columns(3)
+group1, group2, group3 = st.columns(
+    3
+)
 
 
-with group_col1:
+with group1:
 
     st.metric(
         "유소년 인구",
@@ -815,11 +997,11 @@ with group_col1:
     )
 
     st.caption(
-        f"0~14세 · {child_ratio:.1f}%"
+        f"0~14세 · 전체의 {child_ratio:.1f}%"
     )
 
 
-with group_col2:
+with group2:
 
     st.metric(
         "생산연령 인구",
@@ -827,11 +1009,11 @@ with group_col2:
     )
 
     st.caption(
-        f"15~64세 · {working_ratio:.1f}%"
+        f"15~64세 · 전체의 {working_ratio:.1f}%"
     )
 
 
-with group_col3:
+with group3:
 
     st.metric(
         "고령 인구",
@@ -839,14 +1021,14 @@ with group_col3:
     )
 
     st.caption(
-        f"65세 이상 · {elderly_ratio:.1f}%"
+        f"65세 이상 · 전체의 {elderly_ratio:.1f}%"
     )
 
 
 # =========================================================
-# 27. 10세 단위 연령대 함수
+# 37. 10세 단위 연령대 분류
 # =========================================================
-def age_group(age):
+def make_age_group(age):
 
     if age <= 9:
         return "0~9세"
@@ -879,15 +1061,19 @@ def age_group(age):
         return "90세 이상"
 
 
-# =========================================================
-# 28. 연령대별 요약 데이터
-# =========================================================
-age_df["연령대"] = age_df["연령"].apply(
-    age_group
+age_df["연령대"] = (
+    age_df["연령"]
+    .apply(
+        make_age_group
+    )
 )
 
 
+# =========================================================
+# 38. 연령대별 집계
+# =========================================================
 age_group_df = (
+
     age_df
     .groupby(
         "연령대",
@@ -904,12 +1090,17 @@ age_group_df = (
 )
 
 
+# =========================================================
+# 39. 연령대 비율 계산
+# =========================================================
 if total_population > 0:
 
     age_group_df["인구비율(%)"] = (
+
         age_group_df["전체"]
         / total_population
         * 100
+
     ).round(1)
 
 else:
@@ -918,7 +1109,7 @@ else:
 
 
 # =========================================================
-# 29. 연령대별 표
+# 40. 연령대별 표
 # =========================================================
 st.divider()
 
@@ -970,7 +1161,7 @@ st.dataframe(
 
 
 # =========================================================
-# 30. 연령별 상세 데이터
+# 41. 상세 데이터
 # =========================================================
 with st.expander(
     "연령별 상세 데이터 보기"
@@ -1031,10 +1222,47 @@ with st.expander(
 
 
 # =========================================================
-# 31. 하단 정보
+# 42. 데이터 파일 확인용 정보
+# =========================================================
+with st.expander(
+    "데이터 파일 정보"
+):
+
+    st.write(
+        "사용 중인 데이터 파일:"
+    )
+
+    st.code(
+        TARGET_FILE_NAME
+    )
+
+    st.write(
+        f"데이터 행 수: {len(df):,}"
+    )
+
+    st.write(
+        f"데이터 열 수: {len(df.columns):,}"
+    )
+
+    st.write(
+        f"검색 가능한 지역 수: {df['지역명'].nunique():,}"
+    )
+
+
+# =========================================================
+# 43. 하단
 # =========================================================
 st.divider()
 
-st.caption(
-    f"자료: 주민등록 연령별 인구현황 · {year_month if year_month else '기준월 미확인'}"
-)
+
+if year_month:
+
+    st.caption(
+        f"자료: 주민등록 연령별 인구현황 · {year_month}"
+    )
+
+else:
+
+    st.caption(
+        "자료: 주민등록 연령별 인구현황"
+    )
