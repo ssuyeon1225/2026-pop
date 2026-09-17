@@ -1,4 +1,4 @@
-import os
+from pathlib import Path
 import re
 import unicodedata
 
@@ -21,93 +21,139 @@ st.title("전국 인구구조 유사 지역 분석")
 
 st.markdown(
     """
-    원하는 지역을 선택하면 해당 지역의 **연령별 인구구조**와
-    전국에서 인구구조가 가장 비슷한 지역 **TOP 5**를 비교합니다.
+    원하는 지역을 선택하면 해당 지역의 연령별 인구구조를 확인하고,
+    전국에서 **인구구조가 가장 비슷한 지역 TOP 5**를 찾을 수 있습니다.
 
-    인구구조의 유사성은 총인구 규모가 아니라
+    인구구조 유사성은 단순한 총인구가 아니라
     **0세~100세 이상 연령별 인구 비율의 분포**를 기준으로 계산합니다.
     """
 )
 
 
 # =========================================================
-# 2. 데이터 파일명
+# 2. 현재 app.py 위치 확인
 # =========================================================
-TARGET_FILE_NAME = "202608_202608_연령별인구현황_월간.csv"
+BASE_DIR = Path(__file__).resolve().parent
 
 
 # =========================================================
-# 3. app.py가 있는 폴더
+# 3. 한글 파일명 정규화 함수
 # =========================================================
-BASE_DIR = os.path.dirname(
-    os.path.abspath(__file__)
-)
-
-
-# =========================================================
-# 4. 데이터 파일 찾기
-# =========================================================
-def find_data_file():
-
-    target_normalized = unicodedata.normalize(
+def normalize_filename(text):
+    """
+    macOS와 Linux 사이에서 발생할 수 있는
+    한글 NFC/NFD 파일명 차이를 처리합니다.
+    """
+    return unicodedata.normalize(
         "NFC",
-        TARGET_FILE_NAME
+        str(text)
     )
 
-    for file_name in os.listdir(BASE_DIR):
 
-        file_normalized = unicodedata.normalize(
-            "NFC",
-            file_name
+# =========================================================
+# 4. CSV 파일 자동 탐색
+# =========================================================
+def find_population_csv():
+    """
+    app.py가 있는 폴더와 하위 폴더에서
+    CSV 파일을 자동으로 찾습니다.
+
+    우선순위:
+    1. 이름에 '연령별인구현황'이 들어간 CSV
+    2. 이름에 '인구'가 들어간 CSV
+    3. CSV가 하나뿐이면 그 파일
+    """
+
+    # 현재 폴더 + 하위 폴더까지 검색
+    csv_files = list(
+        BASE_DIR.rglob("*.csv")
+    )
+
+    # 숨김 폴더 / 가상환경 등 불필요한 경로 제외
+    csv_files = [
+        path
+        for path in csv_files
+        if ".git" not in path.parts
+        and ".venv" not in path.parts
+        and "venv" not in path.parts
+        and "__pycache__" not in path.parts
+    ]
+
+    if len(csv_files) == 0:
+        return None
+
+    # -----------------------------------------
+    # 1순위: 연령별인구현황
+    # -----------------------------------------
+    for path in csv_files:
+
+        normalized_name = normalize_filename(
+            path.name
         )
 
-        if file_normalized == target_normalized:
+        if "연령별인구현황" in normalized_name:
+            return path
 
-            return os.path.join(
-                BASE_DIR,
-                file_name
-            )
+    # -----------------------------------------
+    # 2순위: 이름에 인구가 들어간 파일
+    # -----------------------------------------
+    for path in csv_files:
 
-    return None
+        normalized_name = normalize_filename(
+            path.name
+        )
+
+        if "인구" in normalized_name:
+            return path
+
+    # -----------------------------------------
+    # 3순위: CSV가 하나뿐이면 사용
+    # -----------------------------------------
+    if len(csv_files) == 1:
+        return csv_files[0]
+
+    # 여러 개라면 첫 번째 CSV 사용
+    return csv_files[0]
 
 
 # =========================================================
-# 5. CSV 읽기
+# 5. CSV 파일 읽기
 # =========================================================
 @st.cache_data
 def load_data():
 
-    file_path = find_data_file()
+    file_path = find_population_csv()
 
     if file_path is None:
-
         raise FileNotFoundError(
-            f"{TARGET_FILE_NAME} 파일을 찾을 수 없습니다."
+            "GitHub 저장소에서 CSV 파일을 찾을 수 없습니다."
         )
 
+    # 주민등록 인구 CSV에서 많이 사용되는 인코딩
     encodings = [
         "cp949",
         "utf-8-sig",
         "utf-8"
     ]
 
+    last_error = None
+
     for encoding in encodings:
 
         try:
 
-            return pd.read_csv(
+            data = pd.read_csv(
                 file_path,
                 encoding=encoding,
                 low_memory=False
             )
 
-        except UnicodeDecodeError:
+            return data, str(file_path)
 
-            continue
+        except UnicodeDecodeError as e:
+            last_error = e
 
-    raise ValueError(
-        "CSV 파일의 인코딩을 확인할 수 없습니다."
-    )
+    raise last_error
 
 
 # =========================================================
@@ -115,30 +161,68 @@ def load_data():
 # =========================================================
 try:
 
-    df = load_data()
+    df, detected_file_path = load_data()
 
-except FileNotFoundError as e:
+except FileNotFoundError:
 
-    st.error(str(e))
+    st.error(
+        "CSV 데이터 파일을 찾을 수 없습니다."
+    )
 
-    st.write("현재 app.py 폴더에서 발견된 파일:")
+    st.markdown(
+        """
+        GitHub 저장소에 CSV 파일이 실제로 업로드되어 있는지 확인하세요.
 
-    for file_name in os.listdir(BASE_DIR):
-        st.write(f"- {file_name}")
+        예:
+        ```text
+        저장소/
+        ├── app.py
+        ├── requirements.txt
+        └── 연령별인구현황.csv
+        ```
+        """
+    )
+
+    st.write(
+        "Streamlit이 현재 확인하고 있는 폴더:"
+    )
+
+    st.code(
+        str(BASE_DIR)
+    )
+
+    st.write(
+        "현재 폴더의 파일:"
+    )
+
+    for path in BASE_DIR.iterdir():
+        st.write(f"- {path.name}")
 
     st.stop()
+
 
 except Exception as e:
 
     st.error(
-        f"데이터를 읽는 중 오류가 발생했습니다: {e}"
+        "CSV 파일을 읽는 중 오류가 발생했습니다."
     )
+
+    st.exception(e)
 
     st.stop()
 
 
 # =========================================================
-# 7. 숫자 변환 함수
+# 7. 데이터 파일 확인
+# =========================================================
+st.success(
+    f"데이터 파일을 정상적으로 불러왔습니다: "
+    f"{Path(detected_file_path).name}"
+)
+
+
+# =========================================================
+# 8. 숫자 변환 함수
 # =========================================================
 def clean_number(value):
 
@@ -155,18 +239,38 @@ def clean_number(value):
         return 0
 
     try:
-
-        return int(
-            float(value)
-        )
+        return int(float(value))
 
     except (ValueError, TypeError):
-
         return 0
 
 
 # =========================================================
-# 8. 전체 연령별 열 찾기
+# 9. 행정구역 열 확인
+# =========================================================
+if "행정구역" not in df.columns:
+
+    st.error(
+        """
+        CSV 파일은 읽었지만 '행정구역' 열을 찾지 못했습니다.
+
+        올바른 주민등록 연령별 인구현황 파일인지 확인하세요.
+        """
+    )
+
+    st.write(
+        "현재 CSV에서 확인된 열:"
+    )
+
+    st.write(
+        df.columns.tolist()
+    )
+
+    st.stop()
+
+
+# =========================================================
+# 10. 전체 연령별 열 찾기
 # =========================================================
 def find_age_columns(dataframe):
 
@@ -216,26 +320,8 @@ def find_age_columns(dataframe):
 
 
 # =========================================================
-# 9. 행정구역 열 확인
+# 11. 지역명 정리
 # =========================================================
-if "행정구역" not in df.columns:
-
-    st.error(
-        "'행정구역' 열을 찾을 수 없습니다."
-    )
-
-    st.stop()
-
-
-# =========================================================
-# 10. 지역명 정리
-# =========================================================
-# 원자료:
-# 서울특별시 종로구 청운효자동(1111051500)
-#
-# 화면:
-# 서울특별시 종로구 청운효자동
-
 df["지역명"] = (
     df["행정구역"]
     .astype(str)
@@ -249,7 +335,7 @@ df["지역명"] = (
 
 
 # =========================================================
-# 11. 행정구역 코드 추출
+# 12. 행정구역 코드 추출
 # =========================================================
 df["행정구역코드"] = (
     df["행정구역"]
@@ -261,7 +347,7 @@ df["행정구역코드"] = (
 
 
 # =========================================================
-# 12. 기준 연월 찾기
+# 13. 기준 연월 확인
 # =========================================================
 year_month = None
 
@@ -274,9 +360,11 @@ for column in df.columns:
 
     if match:
 
+        year = match.group(1)
+        month = match.group(2)
+
         year_month = (
-            f"{match.group(1)}년 "
-            f"{match.group(2)}월"
+            f"{year}년 {month}월"
         )
 
         break
@@ -290,7 +378,7 @@ if year_month:
 
 
 # =========================================================
-# 13. 연령별 열 찾기
+# 14. 연령별 열 찾기
 # =========================================================
 age_columns = find_age_columns(
     df
@@ -300,7 +388,11 @@ age_columns = find_age_columns(
 if len(age_columns) == 0:
 
     st.error(
-        "연령별 인구 열을 찾을 수 없습니다."
+        """
+        0세~100세 이상의 연령별 인구 열을 찾지 못했습니다.
+
+        CSV 파일 형식을 확인하세요.
+        """
     )
 
     st.stop()
@@ -311,10 +403,14 @@ age_column_names = [
     for item in age_columns
 ]
 
-age_values = [
-    item["age"]
-    for item in age_columns
-]
+
+age_values = np.array(
+    [
+        item["age"]
+        for item in age_columns
+    ]
+)
+
 
 age_labels = [
     item["label"]
@@ -323,37 +419,41 @@ age_labels = [
 
 
 # =========================================================
-# 14. 모든 지역의 연령 데이터를 숫자로 변환
+# 15. 전국 연령별 인구 데이터 숫자로 변환
 # =========================================================
 @st.cache_data
 def prepare_population_data(
-    original_df,
+    dataframe,
     columns
 ):
 
-    population_df = (
-        original_df[columns]
+    population_data = (
+        dataframe[columns]
         .copy()
     )
 
     for column in columns:
 
-        population_df[column] = (
-            population_df[column]
+        population_data[column] = (
+            population_data[column]
             .astype(str)
             .str.replace(
                 ",",
                 "",
                 regex=False
             )
+            .str.strip()
         )
 
-        population_df[column] = pd.to_numeric(
-            population_df[column],
-            errors="coerce"
-        ).fillna(0)
+        population_data[column] = (
+            pd.to_numeric(
+                population_data[column],
+                errors="coerce"
+            )
+            .fillna(0)
+        )
 
-    return population_df
+    return population_data
 
 
 population_df = prepare_population_data(
@@ -363,34 +463,33 @@ population_df = prepare_population_data(
 
 
 # =========================================================
-# 15. 각 지역 총인구 계산
+# 16. 각 지역 총인구 계산
 # =========================================================
 region_total_population = (
-    population_df.sum(axis=1)
+    population_df.sum(
+        axis=1
+    )
 )
 
 
 # =========================================================
-# 16. 인구구조 비율 행렬 생성
+# 17. 연령별 인구 비율 계산
 # =========================================================
-# 각 연령 인구 / 해당 지역 총인구
-#
-# 예:
-# 20세 인구 2%
-# 21세 인구 2.1%
-# ...
-
-population_share = population_df.div(
-    region_total_population.replace(
-        0,
-        np.nan
-    ),
-    axis=0
-).fillna(0)
+population_share = (
+    population_df
+    .div(
+        region_total_population.replace(
+            0,
+            np.nan
+        ),
+        axis=0
+    )
+    .fillna(0)
+)
 
 
 # =========================================================
-# 17. 코사인 유사도 계산용 정규화
+# 18. 코사인 유사도 계산용 행렬 준비
 # =========================================================
 population_matrix = (
     population_share
@@ -418,57 +517,53 @@ normalized_population_matrix = np.divide(
 
 
 # =========================================================
-# 18. 유사 지역 탐색 함수
+# 19. 유사 지역 TOP N 함수
 # =========================================================
 def find_similar_regions(
     selected_index,
     top_n=5
 ):
 
-    # 선택 지역의 벡터
+    selected_position = df.index.get_loc(
+        selected_index
+    )
+
     selected_vector = (
         normalized_population_matrix[
-            selected_index
+            selected_position
         ]
     )
 
-    # 코사인 유사도
     similarities = (
         normalized_population_matrix
         @ selected_vector
     )
 
+
     result = pd.DataFrame(
         {
-            "index": df.index,
-            "지역명": df["지역명"],
-            "행정구역코드": df["행정구역코드"],
-            "총인구": region_total_population,
+            "원본인덱스": df.index,
+            "지역명": df["지역명"].values,
+            "행정구역코드": df["행정구역코드"].values,
+            "총인구": region_total_population.values,
             "유사도": similarities
         }
     )
 
 
-    # ---------------------------------------------
-    # 선택 지역 자체 제거
-    # ---------------------------------------------
+    # 선택 지역 자신 제거
     result = result[
-        result["index"]
+        result["원본인덱스"]
         != selected_index
     ]
 
 
-    # ---------------------------------------------
-    # 인구가 0인 지역 제거
-    # ---------------------------------------------
+    # 인구 0인 지역 제거
     result = result[
         result["총인구"] > 0
     ]
 
 
-    # ---------------------------------------------
-    # 유사도가 높은 순으로 정렬
-    # ---------------------------------------------
     result = (
         result
         .sort_values(
@@ -490,7 +585,7 @@ def find_similar_regions(
 
 
 # =========================================================
-# 19. 지역 검색 영역
+# 20. 지역 선택
 # =========================================================
 st.divider()
 
@@ -502,8 +597,8 @@ st.subheader(
 search_keyword = st.text_input(
     "지역명을 입력하세요",
     placeholder=(
-        "예: 강남구, 종로구, "
-        "청운효자동, 수원시, 서울"
+        "예: 서울, 강남구, 종로구, "
+        "청운효자동, 수원시"
     )
 )
 
@@ -514,7 +609,7 @@ search_keyword = (
 
 
 # =========================================================
-# 20. 검색 결과
+# 21. 검색 결과 필터링
 # =========================================================
 if search_keyword:
 
@@ -534,7 +629,7 @@ else:
 
 
 # =========================================================
-# 21. 선택 메뉴 생성
+# 22. 지역 선택 옵션
 # =========================================================
 region_options = (
     filtered_df[
@@ -543,8 +638,32 @@ region_options = (
             "행정구역코드"
         ]
     ]
-    .drop_duplicates()
     .copy()
+)
+
+
+region_options["행정구역코드"] = (
+    region_options[
+        "행정구역코드"
+    ]
+    .fillna("")
+    .astype(str)
+)
+
+
+region_options["선택표시"] = (
+    region_options["지역명"]
+    + " ("
+    + region_options["행정구역코드"]
+    + ")"
+)
+
+
+region_options = (
+    region_options
+    .drop_duplicates(
+        subset=["선택표시"]
+    )
 )
 
 
@@ -557,681 +676,55 @@ if region_options.empty:
     st.stop()
 
 
-# =========================================================
-# 22. 지역 선택용 라벨 생성
-# =========================================================
-region_options["선택표시"] = (
-    region_options["지역명"]
-    + " ("
-    + region_options["행정구역코드"]
-        .fillna("")
-        .astype(str)
-    + ")"
-)
-
-
 selected_display = st.selectbox(
     "지역을 선택하세요",
-    region_options["선택표시"]
+    options=region_options[
+        "선택표시"
+    ].tolist()
 )
 
 
 # =========================================================
-# 23. 선택한 지역 찾기
+# 23. 선택 지역 확인
 # =========================================================
-selected_option = region_options[
-    region_options["선택표시"]
-    == selected_display
-].iloc[0]
+selected_option = (
+    region_options[
+        region_options["선택표시"]
+        == selected_display
+    ]
+    .iloc[0]
+)
 
 
 selected_region = (
     selected_option["지역명"]
 )
 
-selected_code = (
-    selected_option["행정구역코드"]
+
+selected_code = str(
+    selected_option[
+        "행정구역코드"
+    ]
+)
+
+
+selected_mask = (
+    (df["지역명"] == selected_region)
+    &
+    (
+        df["행정구역코드"]
+        .fillna("")
+        .astype(str)
+        == selected_code
+    )
 )
 
 
 selected_rows = df[
-    (
-        df["지역명"]
-        == selected_region
-    )
-    &
-    (
-        df["행정구역코드"]
-        == selected_code
-    )
+    selected_mask
 ]
 
 
 if selected_rows.empty:
 
-    st.error(
-        "선택한 지역 데이터를 찾을 수 없습니다."
-    )
-
-    st.stop()
-
-
-selected_index = (
-    selected_rows.index[0]
-)
-
-
-# =========================================================
-# 24. TOP 5 유사지역 계산
-# =========================================================
-similar_regions = find_similar_regions(
-    selected_index,
-    top_n=5
-)
-
-
-# =========================================================
-# 25. 선택 지역 기본 정보
-# =========================================================
-selected_total = int(
-    region_total_population.loc[
-        selected_index
-    ]
-)
-
-
-st.divider()
-
-st.subheader(
-    f"{selected_region} 분석"
-)
-
-
-metric1, metric2 = st.columns(2)
-
-
-with metric1:
-
-    st.metric(
-        "선택 지역 총인구",
-        f"{selected_total:,}명"
-    )
-
-
-with metric2:
-
-    st.metric(
-        "비교 지역 수",
-        f"{len(df) - 1:,}개"
-    )
-
-
-# =========================================================
-# 26. TOP 5 결과 표
-# =========================================================
-st.divider()
-
-st.subheader(
-    "전국 인구구조 유사 지역 TOP 5"
-)
-
-
-display_similarity_df = (
-    similar_regions[
-        [
-            "지역명",
-            "총인구",
-            "유사도(%)"
-        ]
-    ]
-    .copy()
-)
-
-
-display_similarity_df.insert(
-    0,
-    "순위",
-    range(
-        1,
-        len(display_similarity_df) + 1
-    )
-)
-
-
-st.dataframe(
-
-    display_similarity_df,
-
-    column_config={
-
-        "순위":
-            st.column_config.NumberColumn(
-                "순위",
-                format="%d"
-            ),
-
-        "지역명":
-            st.column_config.TextColumn(
-                "지역"
-            ),
-
-        "총인구":
-            st.column_config.NumberColumn(
-                "총인구",
-                format="%d명"
-            ),
-
-        "유사도(%)":
-            st.column_config.NumberColumn(
-                "구조 유사도",
-                format="%.2f%%"
-            )
-    },
-
-    hide_index=True,
-
-    use_container_width=True
-)
-
-
-# =========================================================
-# 27. 그래프용 함수
-# =========================================================
-def get_region_population_share(
-    region_index
-):
-
-    values = (
-        population_share.loc[
-            region_index
-        ]
-        .to_numpy(
-            dtype=float
-        )
-        * 100
-    )
-
-    return values
-
-
-# =========================================================
-# 28. Plotly 비교 그래프
-# =========================================================
-st.divider()
-
-st.subheader(
-    "연령별 인구구조 비교"
-)
-
-
-st.markdown(
-    """
-    아래 그래프는 각 연령 인구가 해당 지역 전체 인구에서
-    차지하는 **비율(%)**을 표시합니다.
-
-    따라서 지역별 총인구 규모가 달라도
-    인구구조의 모양을 직접 비교할 수 있습니다.
-    """
-)
-
-
-# =========================================================
-# 29. 표시 연령 선택
-# =========================================================
-age_range = st.slider(
-    "표시할 연령 범위",
-    min_value=0,
-    max_value=100,
-    value=(0, 100),
-    step=1
-)
-
-
-# =========================================================
-# 30. Plotly Figure 생성
-# =========================================================
-fig = go.Figure()
-
-
-# =========================================================
-# 31. 선택 지역 그래프
-# =========================================================
-selected_share = (
-    get_region_population_share(
-        selected_index
-    )
-)
-
-
-age_mask = np.array(
-    [
-        age_range[0] <= age <= age_range[1]
-        for age in age_values
-    ]
-)
-
-
-filtered_ages = (
-    np.array(age_values)[
-        age_mask
-    ]
-)
-
-
-filtered_selected_share = (
-    selected_share[
-        age_mask
-    ]
-)
-
-
-fig.add_trace(
-
-    go.Scatter(
-
-        x=filtered_ages,
-
-        y=filtered_selected_share,
-
-        mode="lines",
-
-        name=f"선택: {selected_region}",
-
-        line=dict(
-            width=5
-        ),
-
-        hovertemplate=(
-            "<b>%{x}세</b><br>"
-            "전체 인구 중 %{y:.2f}%"
-            "<extra></extra>"
-        )
-    )
-)
-
-
-# =========================================================
-# 32. 유사 지역 TOP 5 그래프 추가
-# =========================================================
-for rank, (_, row) in enumerate(
-    similar_regions.iterrows(),
-    start=1
-):
-
-    region_index = int(
-        row["index"]
-    )
-
-    region_name = (
-        row["지역명"]
-    )
-
-    similarity = (
-        row["유사도(%)"]
-    )
-
-
-    region_share = (
-        get_region_population_share(
-            region_index
-        )
-    )
-
-
-    filtered_region_share = (
-        region_share[
-            age_mask
-        ]
-    )
-
-
-    fig.add_trace(
-
-        go.Scatter(
-
-            x=filtered_ages,
-
-            y=filtered_region_share,
-
-            mode="lines",
-
-            name=(
-                f"{rank}위 {region_name} "
-                f"({similarity:.2f}%)"
-            ),
-
-            line=dict(
-                width=2
-            ),
-
-            hovertemplate=(
-                f"<b>{rank}위 {region_name}</b><br>"
-                "%{x}세<br>"
-                "전체 인구 중 %{y:.2f}%"
-                "<extra></extra>"
-            )
-        )
-    )
-
-
-# =========================================================
-# 33. Plotly 디자인
-# =========================================================
-fig.update_layout(
-
-    title=dict(
-        text=(
-            f"{selected_region} vs "
-            "전국 유사 인구구조 TOP 5"
-        ),
-
-        x=0.5,
-
-        xanchor="center"
-    ),
-
-    xaxis_title="연령",
-
-    yaxis_title="지역 전체 인구 중 비율(%)",
-
-    template="plotly_white",
-
-    height=750,
-
-    hovermode="x unified",
-
-    margin=dict(
-        l=40,
-        r=30,
-        t=100,
-        b=60
-    ),
-
-    legend=dict(
-        orientation="h",
-        yanchor="bottom",
-        y=1.02,
-        xanchor="center",
-        x=0.5
-    )
-)
-
-
-fig.update_xaxes(
-
-    tickmode="linear",
-
-    tick0=0,
-
-    dtick=5,
-
-    range=[
-        age_range[0],
-        age_range[1]
-    ],
-
-    showgrid=True
-)
-
-
-fig.update_yaxes(
-
-    ticksuffix="%",
-
-    rangemode="tozero",
-
-    showgrid=True
-)
-
-
-# =========================================================
-# 34. 그래프 출력
-# =========================================================
-st.plotly_chart(
-    fig,
-    use_container_width=True
-)
-
-
-st.caption(
-    """
-    ※ 100세는 원자료의 '100세 이상'을 의미합니다.
-    ※ 선택 지역 자체는 유사 지역 검색에서 제외됩니다.
-    """
-)
-
-
-# =========================================================
-# 35. 유사도 막대그래프
-# =========================================================
-st.divider()
-
-st.subheader(
-    "TOP 5 지역의 인구구조 유사도"
-)
-
-
-bar_df = (
-    similar_regions
-    .sort_values(
-        "유사도(%)",
-        ascending=True
-    )
-)
-
-
-bar_fig = go.Figure()
-
-
-bar_fig.add_trace(
-
-    go.Bar(
-
-        x=bar_df["유사도(%)"],
-
-        y=bar_df["지역명"],
-
-        orientation="h",
-
-        text=bar_df[
-            "유사도(%)"
-        ].map(
-            lambda x: f"{x:.2f}%"
-        ),
-
-        textposition="auto",
-
-        hovertemplate=(
-            "<b>%{y}</b><br>"
-            "유사도: %{x:.2f}%"
-            "<extra></extra>"
-        )
-    )
-)
-
-
-bar_fig.update_layout(
-
-    title=dict(
-        text=(
-            f"{selected_region}과의 "
-            "인구구조 유사도"
-        ),
-
-        x=0.5
-    ),
-
-    xaxis_title="코사인 유사도 (%)",
-
-    yaxis_title="지역",
-
-    template="plotly_white",
-
-    height=450,
-
-    margin=dict(
-        l=30,
-        r=30,
-        t=70,
-        b=50
-    )
-)
-
-
-bar_fig.update_xaxes(
-    ticksuffix="%"
-)
-
-
-st.plotly_chart(
-    bar_fig,
-    use_container_width=True
-)
-
-
-# =========================================================
-# 36. TOP 5 지역 세부정보
-# =========================================================
-st.divider()
-
-st.subheader(
-    "TOP 5 지역 세부정보"
-)
-
-
-for rank, (_, row) in enumerate(
-    similar_regions.iterrows(),
-    start=1
-):
-
-    region_index = int(
-        row["index"]
-    )
-
-    region_name = (
-        row["지역명"]
-    )
-
-    total_pop = int(
-        row["총인구"]
-    )
-
-    similarity = (
-        row["유사도(%)"]
-    )
-
-
-    with st.expander(
-        f"{rank}위 · {region_name} "
-        f"· 유사도 {similarity:.2f}%"
-    ):
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-
-            st.metric(
-                "총인구",
-                f"{total_pop:,}명"
-            )
-
-        with col2:
-
-            st.metric(
-                "인구구조 유사도",
-                f"{similarity:.2f}%"
-            )
-
-
-# =========================================================
-# 37. 방법 설명
-# =========================================================
-st.divider()
-
-with st.expander(
-    "인구구조 유사도는 어떻게 계산했나요?"
-):
-
-    st.markdown(
-        """
-        ### 계산 방법
-
-        각 지역의 인구수를 그대로 비교하면
-        서울특별시와 작은 읍·면·동처럼 인구 규모가 다른 지역은
-        비교하기 어렵습니다.
-
-        따라서 다음 순서로 계산합니다.
-
-        **1. 각 지역의 연령별 인구 비율 계산**
-
-        예를 들어 어떤 지역의 총인구가 10,000명이고
-        30세 인구가 200명이라면:
-
-        ```
-        30세 비율 = 200 / 10,000 = 0.02
-        ```
-
-        즉 2%입니다.
-
-        이를 0세부터 100세 이상까지 계산하여 하나의
-        **연령분포 벡터**로 만듭니다.
-
-        **2. 전국 모든 지역과 코사인 유사도 계산**
-
-        두 지역의 연령분포 벡터가 얼마나 같은 방향을
-        가지는지 계산합니다.
-
-        코사인 유사도가 1에 가까울수록
-        연령별 인구분포의 형태가 유사합니다.
-
-        **3. 선택한 지역 자체를 제외하고 유사도가 가장 높은
-        5개 지역을 제시합니다.**
-
-        따라서 이 분석은 단순히 총인구가 비슷한 지역을 찾는 것이 아니라
-        **연령별 인구구조의 형태가 가장 비슷한 지역을 찾는 분석**입니다.
-        """
-    )
-
-
-# =========================================================
-# 38. 데이터 정보
-# =========================================================
-with st.expander(
-    "데이터 정보"
-):
-
-    st.write(
-        f"데이터 행 수: {len(df):,}"
-    )
-
-    st.write(
-        f"비교 가능한 지역 수: "
-        f"{(region_total_population > 0).sum():,}"
-    )
-
-    st.write(
-        f"연령 구간 수: {len(age_columns):,}"
-    )
-
-    st.write(
-        f"사용 데이터: {TARGET_FILE_NAME}"
-    )
-
-
-# =========================================================
-# 39. 하단
-# =========================================================
-st.divider()
-
-
-if year_month:
-
-    st.caption(
-        f"자료: 주민등록 연령별 인구현황 · {year_month}"
-    )
-
-else:
-
-    st.caption(
-        "자료: 주민등록 연령별 인구현황"
-    )
+    st
